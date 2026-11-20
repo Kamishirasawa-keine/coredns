@@ -1,0 +1,5 @@
+# Third-party licensing
+
+Simplifiedns's original code is licensed under BSD-3-Clause. This does not relicense Go, CoreDNS, or any other dependency. Distributed binaries include components under Apache-2.0 (such as CoreDNS and Prometheus), BSD-family terms (such as miekg/dns and Go), MIT (such as quic-go), and MPL-2.0 (HashiCorp golang-lru/v2). These licenses allow distribution alongside BSD-3-Clause code subject to their own conditions. Retain the accompanying copyright, license and NOTICE files when redistributing the binaries or APKs.
+
+The MPL-2.0-covered dependency is unmodified. Its corresponding source is available at https://github.com/hashicorp/golang-lru/tree/v2.0.7/v2 (or via `go mod download github.com/hashicorp/golang-lru/v2@v2.0.7`). Other module source versions are identified in `go.mod` and `go.sum`; the Go standard library source is available at https://go.dev/dl/. For any redistribution with changes to MPL-covered files, provide the corresponding modified source under MPL-2.0 as required by that license.

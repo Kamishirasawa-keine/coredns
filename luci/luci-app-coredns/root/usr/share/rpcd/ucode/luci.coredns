@@ -1,0 +1,84 @@
+'use strict';
+
+import { open, popen, readfile, rename, unlink } from 'fs';
+
+const path = '/etc/coredns/Corefile';
+const max_size = 32768;
+
+return {
+	'luci.coredns': {
+		subscription_status: {
+			call: function() {
+				return { status: trim(readfile('/tmp/coredns-subscriptions.status', 64) ?? '') };
+			}
+		},
+		update_subscriptions: {
+			call: function() {
+				return { queued: system('/usr/libexec/coredns-subscriptions queue') == 0 };
+			}
+		},
+		get_metrics: {
+			call: function() {
+				// Fixed loopback URL; do not expose a general HTTP proxy to LuCI.
+				let proc = popen('/bin/uclient-fetch --no-proxy -q -T 2 -O - http://127.0.0.1:9153/metrics', 'r');
+				if (!proc)
+					return { error: 'unavailable' };
+				let limit = 256 * 1024;
+				let content = proc.read(limit + 1);
+				let code = proc.close();
+				if (length(content) > limit)
+					return { error: 'size' };
+				if (code != 0 || !length(content))
+					return { error: 'unavailable' };
+				return { content };
+			}
+		},
+		get_corefile: {
+			call: function() {
+				let content = readfile(path, max_size + 1);
+				if (content == null)
+					return { error: 'read' };
+				if (length(content) > max_size)
+					return { error: 'size' };
+				return { content };
+			}
+		},
+		save_corefile: {
+			args: { content: 'string' },
+			call: function(request) {
+				let content = request.args.content;
+				if (type(content) != 'string' || !length(trim(content)) || index(content, chr(0)) >= 0)
+					return { error: 'empty' };
+				if (length(content) > max_size)
+					return { error: 'size' };
+
+				// Keep the candidate alongside Corefile for relative imports and atomic rename.
+				let proc = popen('/bin/mktemp /etc/coredns/.Corefile.XXXXXX', 'r');
+				if (!proc)
+					return { error: 'write' };
+				let candidate = trim(proc.read('all') ?? '');
+				if (proc.close() != 0 || !match(candidate, /^\/etc\/coredns\/\.Corefile\.[A-Za-z0-9]{6}$/))
+					return { error: 'write' };
+
+				let result = { error: 'write' };
+				let fd = open(candidate, 'w');
+				if (fd) {
+					let written = fd.write(content);
+					let closed = fd.close();
+					if (written == length(content) && closed) {
+						proc = popen('/usr/bin/coredns -check-config ' + candidate + ' 2>&1', 'r');
+						if (proc) {
+							let details = proc.read('all');
+							if (proc.close() != 0)
+								result = { error: 'invalid', details: substr(trim(details ?? ''), 0, 2048) };
+							else if (rename(candidate, path))
+								return { saved: true };
+						}
+					}
+				}
+				unlink(candidate);
+				return result;
+			}
+		}
+	}
+};

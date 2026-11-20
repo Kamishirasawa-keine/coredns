@@ -1,0 +1,279 @@
+package splitroute
+
+import (
+	"context"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coredns/coredns/plugin/pkg/dnstest"
+	"github.com/coredns/coredns/request"
+	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+)
+
+// testUpstream is a loopback DNS server. It lets the regression tests verify
+// routing and fallback without depending on public resolvers.
+type testUpstream struct {
+	addr   string
+	server *dns.Server
+
+	mu     sync.Mutex
+	counts map[string]int
+	rcode  int
+	delay  time.Duration
+	answer string
+}
+
+func newTestUpstream(t *testing.T, answer string) *testUpstream {
+	t.Helper()
+	u := &testUpstream{counts: make(map[string]int), answer: answer}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.addr = pc.LocalAddr().String()
+	u.server = &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		name := normalizeTestName(r.Question[0].Name)
+		u.mu.Lock()
+		u.counts[name]++
+		rcode, delay := u.rcode, u.delay
+		u.mu.Unlock()
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.RecursionAvailable = true
+		m.Rcode = rcode
+		if rcode == dns.RcodeSuccess {
+			m.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.ParseIP(u.answer),
+			}}
+		}
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = u.server.ActivateAndServe() }()
+	t.Cleanup(func() { _ = u.server.Shutdown() })
+	return u
+}
+
+func normalizeTestName(s string) string {
+	for len(s) > 0 && s[len(s)-1] == '.' {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+func (u *testUpstream) count(name string) int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.counts[name]
+}
+
+func (u *testUpstream) set(rcode int, delay time.Duration) {
+	u.mu.Lock()
+	u.rcode, u.delay = rcode, delay
+	u.mu.Unlock()
+}
+
+func testGroup(t *testing.T, name string, concurrent int, timeout time.Duration, upstreams ...*testUpstream) *group {
+	t.Helper()
+	g := &group{name: name, concurrent: concurrent, timeout: timeout, ignore: make(map[int]struct{})}
+	for _, mock := range upstreams {
+		u, err := newUpstream("udp://"+mock.addr, name, timeout, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g.upstreams = append(g.upstreams, u)
+	}
+	g.start(time.Hour)
+	t.Cleanup(g.stop)
+	return g
+}
+
+func testQuery(name string) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), dns.TypeA)
+	return m
+}
+
+func answerIP(t *testing.T, m *dns.Msg) string {
+	t.Helper()
+	if m == nil || m.Rcode != dns.RcodeSuccess || len(m.Answer) != 1 {
+		t.Fatalf("unexpected answer: %#v", m)
+	}
+	a, ok := m.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("answer is %T, want *dns.A", m.Answer[0])
+	}
+	return a.A.String()
+}
+
+func testState(name string) request.Request {
+	return request.Request{W: dnstest.NewRecorder(&testResponseWriter{}), Req: testQuery(name)}
+}
+
+func TestMosdnsLatencyFallback(t *testing.T) {
+	localMock := newTestUpstream(t, "192.0.2.1")
+	remoteMock := newTestUpstream(t, "198.51.100.1")
+	localMock.set(dns.RcodeSuccess, 200*time.Millisecond)
+	s := &SplitRoute{
+		local:     testGroup(t, "local", 1, time.Second, localMock),
+		remote:    testGroup(t, "remote", 1, time.Second, remoteMock),
+		threshold: 30 * time.Millisecond,
+	}
+	start := time.Now()
+	m, err := s.primaryWithFallback(context.Background(), testState("slow.cn.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answerIP(t, m); got != "198.51.100.1" {
+		t.Fatalf("fallback answer=%s, want remote", got)
+	}
+	if elapsed := time.Since(start); elapsed > 170*time.Millisecond {
+		t.Fatalf("fallback waited for slow primary: %s", elapsed)
+	}
+	if remoteMock.count("slow.cn.test") != 1 {
+		t.Fatal("secondary was not started")
+	}
+}
+
+func TestMosdnsSERVFAILTriggersImmediateFallback(t *testing.T) {
+	localMock := newTestUpstream(t, "192.0.2.1")
+	remoteMock := newTestUpstream(t, "198.51.100.1")
+	localMock.set(dns.RcodeServerFailure, 0)
+	local := testGroup(t, "local", 1, time.Second, localMock)
+	local.ignore[dns.RcodeServerFailure] = struct{}{}
+	s := &SplitRoute{
+		local: local, remote: testGroup(t, "remote", 1, time.Second, remoteMock),
+		threshold: 5 * time.Second,
+	}
+	start := time.Now()
+	m, err := s.primaryWithFallback(context.Background(), testState("servfail.cn.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answerIP(t, m); got != "198.51.100.1" {
+		t.Fatalf("answer=%s, want remote", got)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("SERVFAIL fallback waited for threshold: %s", elapsed)
+	}
+}
+
+func TestMosdnsFastPrimaryDoesNotFallback(t *testing.T) {
+	localMock := newTestUpstream(t, "192.0.2.1")
+	remoteMock := newTestUpstream(t, "198.51.100.1")
+	s := &SplitRoute{
+		local:  testGroup(t, "local", 1, time.Second, localMock),
+		remote: testGroup(t, "remote", 1, time.Second, remoteMock), threshold: time.Second,
+	}
+	m, err := s.primaryWithFallback(context.Background(), testState("fast.cn.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answerIP(t, m); got != "192.0.2.1" {
+		t.Fatalf("answer=%s, want local", got)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if remoteMock.count("fast.cn.test") != 0 {
+		t.Fatal("remote must remain standby when local answers before threshold")
+	}
+}
+
+func TestRoundRobinAtSignedBoundary(t *testing.T) {
+	a := newTestUpstream(t, "192.0.2.1")
+	b := newTestUpstream(t, "192.0.2.2")
+	g := &group{name: "test", concurrent: 1, rr: 1<<31 - 1}
+	c := newTestUpstream(t, "192.0.2.3")
+	for _, mock := range []*testUpstream{a, b, c} {
+		u, err := newUpstream("udp://"+mock.addr, g.name, time.Second, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g.upstreams = append(g.upstreams, u)
+	}
+	g.start(time.Second)
+	defer g.stop()
+	for range 2 {
+		if _, err := g.exchange(t.Context(), testState("boundary.test")); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMosdnsConcurrentUpstreams(t *testing.T) {
+	slow := newTestUpstream(t, "192.0.2.1")
+	fast := newTestUpstream(t, "192.0.2.2")
+	slow.set(dns.RcodeSuccess, 250*time.Millisecond)
+	g := testGroup(t, "local", 2, time.Second, slow, fast)
+	start := time.Now()
+	m, err := g.exchange(context.Background(), testState("race.cn.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answerIP(t, m); got != "192.0.2.2" {
+		t.Fatalf("answer=%s, want fastest upstream", got)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("concurrent=2 behaved sequentially: %s", elapsed)
+	}
+	if slow.count("race.cn.test") != 1 || fast.count("race.cn.test") != 1 {
+		t.Fatal("concurrent=2 must query both upstreams")
+	}
+}
+
+func TestUpstreamMetrics(t *testing.T) {
+	mock := newTestUpstream(t, "192.0.2.1")
+	g := testGroup(t, "local", 1, time.Second, mock)
+	requests := upstreamRequests.WithLabelValues(g.name, g.upstreams[0].spec)
+	failures := upstreamFailures.WithLabelValues(g.name, g.upstreams[0].spec)
+	beforeRequests, beforeFailures := testutil.ToFloat64(requests), testutil.ToFloat64(failures)
+
+	for _, rcode := range []int{dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeServerFailure, dns.RcodeRefused} {
+		mock.set(rcode, 0)
+		if _, err := g.exchange(t.Context(), testState("metrics.test")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mock.set(dns.RcodeFormatError, 0)
+	g.ignore[dns.RcodeFormatError] = struct{}{}
+	if _, err := g.exchange(t.Context(), testState("metrics.test")); err == nil {
+		t.Fatal("ignored rcode should fail")
+	}
+	if got := testutil.ToFloat64(requests) - beforeRequests; got != 5 {
+		t.Errorf("upstream requests = %v, want 5", got)
+	}
+	if got := testutil.ToFloat64(failures) - beforeFailures; got != 3 {
+		t.Errorf("upstream failures = %v, want 3", got)
+	}
+	if g.upstreamFailed(nil, context.Canceled) || !g.upstreamFailed(nil, context.DeadlineExceeded) {
+		t.Fatal("cancellation is not a failure, but a deadline is")
+	}
+}
+
+func TestInvalidQueryReturnsFORMERR(t *testing.T) {
+	s := &SplitRoute{}
+	r := testQuery("double.question.test")
+	r.Question = append(r.Question, r.Question[0])
+	rec := dnstest.NewRecorder(&testResponseWriter{})
+	rcode, err := s.ServeDNS(context.Background(), rec, r)
+	if err == nil || rcode != dns.RcodeFormatError || rec.Msg == nil || rec.Msg.Rcode != dns.RcodeFormatError {
+		t.Fatalf("rcode=%d err=%v msg=%#v", rcode, err, rec.Msg)
+	}
+}
+
+// testResponseWriter implements the methods required by dnstest.Recorder.
+type testResponseWriter struct{}
+
+func (*testResponseWriter) LocalAddr() net.Addr       { return &net.UDPAddr{IP: net.IPv4zero, Port: 53} }
+func (*testResponseWriter) RemoteAddr() net.Addr      { return &net.UDPAddr{IP: net.IPv4zero, Port: 5353} }
+func (*testResponseWriter) Write([]byte) (int, error) { return 0, nil }
+func (*testResponseWriter) WriteMsg(*dns.Msg) error   { return nil }
+func (*testResponseWriter) Close() error              { return nil }
+func (*testResponseWriter) TsigStatus() error         { return nil }
+func (*testResponseWriter) TsigTimersOnly(bool)       {}
+func (*testResponseWriter) Hijack()                   {}

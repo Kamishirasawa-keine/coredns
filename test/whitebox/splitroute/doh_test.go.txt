@@ -1,0 +1,52 @@
+package splitroute
+
+import (
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/coredns/coredns/request"
+	"github.com/miekg/dns"
+)
+
+func TestDoHUpstream(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/dns-query" || r.Host != "example.com" || r.ProtoMajor != 2 || r.TLS.ServerName != "example.com" {
+			t.Errorf("unexpected DoH request: %s %s %s %s SNI=%s", r.Method, r.URL.Path, r.Host, r.Proto, r.TLS.ServerName)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		if err != nil || q.Unpack(data) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		data, err = new(dns.Msg).SetReply(q).Pack()
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(data)
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	bootstrap := newTestUpstream(t, "127.0.0.1")
+	_, port, _ := net.SplitHostPort(server.Listener.Addr().String())
+	u, err := newUpstream("https://bootstrap-test.invalid:"+port+"/dns-query", "remote", time.Second, "example.com", true, bootstrap.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.httpClient.CloseIdleConnections()
+	q := new(dns.Msg).SetQuestion("example.test.", dns.TypeA)
+	m, _, _, err := u.proxy.Connect(t.Context(), request.Request{Req: q}, u.opts)
+	if err != nil || m == nil || m.Id != q.Id || m.Rcode != dns.RcodeSuccess {
+		t.Fatalf("DoH response=%v err=%v", m, err)
+	}
+}

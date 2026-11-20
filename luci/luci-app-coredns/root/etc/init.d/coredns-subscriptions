@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+START=61
+STOP=10
+
+job='0 * * * * /usr/libexec/coredns-subscriptions scheduled'
+
+start() {
+	mkdir -p /etc/crontabs || return 1
+	local tab
+	tab=$(crontab -l 2>/dev/null) || tab=''
+	if ! printf '%s\n' "$tab" | grep -Fxq "$job"; then
+		printf '%s\n' "$tab" "$job" | crontab - || return 1
+	fi
+	# Cron might have skipped startup when no crontabs existed yet.
+	/etc/init.d/cron running || /etc/init.d/cron start
+}
+
+stop() {
+	local tab
+	tab=$(crontab -l 2>/dev/null) || return 0
+	printf '%s\n' "$tab" | grep -Fxv "$job" | crontab -
+}

@@ -1,0 +1,39 @@
+package blocklist
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestReloadKeepsPreviousSnapshotOnError(t *testing.T) {
+	root := t.TempDir()
+	deny := resolvePath(root, "deny.txt")
+	allow := resolvePath(root, "allow.txt")
+	write := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(deny, "old.test\n")
+	write(allow, "")
+	s := &ruleSet{files: []ruleFile{{path: deny}, {path: allow, allow: true}}}
+	if err := s.reload(); err != nil {
+		t.Fatal(err)
+	}
+	old := s.current.Load()
+	write(deny, "new.test\n")
+	write(allow, strings.Repeat("x", 300<<10))
+	if err := s.reload(); err == nil || s.current.Load() != old {
+		t.Fatalf("partial reload published: %v", err)
+	}
+	write(allow, "except.test\n")
+	if err := s.reload(); err != nil {
+		t.Fatal(err)
+	}
+	current := s.current.Load()
+	if current == old || !current.blocked("new.test") || current.blocked("old.test") {
+		t.Fatal("replacement snapshot not installed")
+	}
+}

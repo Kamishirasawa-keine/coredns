@@ -1,0 +1,77 @@
+package domainlist
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"google.golang.org/protobuf/encoding/protowire"
+)
+
+func TestGeoSiteReload(t *testing.T) {
+	dir := t.TempDir()
+	rules, geo := filepath.Join(dir, "direct.txt"), filepath.Join(dir, geoFile)
+	write := func(path string, contents []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	field := func(b []byte, id protowire.Number, s []byte) []byte {
+		return protowire.AppendBytes(protowire.AppendTag(b, id, protowire.BytesType), s)
+	}
+	domain := func(kind uint64, value string) []byte {
+		b := protowire.AppendVarint(protowire.AppendTag(nil, 1, protowire.VarintType), kind)
+		return field(b, 2, []byte(value))
+	}
+	group := func(tag string, domains ...[]byte) []byte {
+		b := field(nil, 1, []byte(tag))
+		for _, d := range domains {
+			b = field(b, 2, d)
+		}
+		return field(nil, 1, b)
+	}
+	write(rules, []byte("geosite:china-list\ngeosite:apple-cn # comment\n"))
+	f := NewFileSet([]string{rules}, 0, nil)
+	if _, err := f.Load(); err != nil || f.Match("example.cn") {
+		t.Fatalf("unexpected initial rules before first GeoSite download: %v", err)
+	}
+	china := group("CHINA-LIST", domain(2, "example.cn"), domain(0, "china-keyword"), domain(1, `^regex\.test$`))
+	apple := group("APPLE-CN", domain(3, "apple.test"))
+	write(geo, append(append(china, apple...), group("OTHER", domain(2, "remote.test"))...))
+	if err := CheckGeoSite(geo, rules); err != nil {
+		t.Fatal(err)
+	}
+	f.reloadIfChanged()
+	for _, q := range []string{"sub.example.cn", "china-keyword.test", "regex.test", "APPLE.TEST."} {
+		if !f.Match(q) {
+			t.Errorf("%s should be direct", q)
+		}
+	}
+	for _, q := range []string{"fakeexample.cn", "sub.apple.test", "remote.test"} {
+		if f.Match(q) {
+			t.Errorf("%s should not be direct", q)
+		}
+	}
+	write(rules, []byte("manual.test\n"))
+	f.reloadIfChanged()
+	if !f.Match("apple.test") || f.Match("manual.test") {
+		t.Fatal("legacy rule should not replace the current snapshot")
+	}
+	write(rules, []byte("geosite:china-list\ngeosite:apple-cn\n"))
+	write(geo, china)
+	if err := CheckGeoSite(geo, rules); err == nil {
+		t.Fatal("missing requested category must fail validation")
+	}
+	f.reloadIfChanged()
+	if !f.Match("apple.test") {
+		t.Fatal("failed reload lost earlier snapshot")
+	}
+	if err := os.Remove(geo); err != nil {
+		t.Fatal(err)
+	}
+	f.reloadIfChanged()
+	if !f.Match("apple.test") {
+		t.Fatal("database disappearance lost earlier snapshot")
+	}
+}

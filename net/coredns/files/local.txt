@@ -1,0 +1,2 @@
+geosite:china-list
+geosite:apple-cn

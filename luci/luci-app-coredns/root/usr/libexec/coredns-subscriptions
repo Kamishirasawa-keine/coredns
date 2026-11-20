@@ -1,0 +1,153 @@
+#!/bin/sh
+# Only this updater writes rule files. Both entry points use the same lock.
+set -eu
+
+config=coredns-subscriptions.main
+state=/tmp/coredns-subscriptions.status
+root=/etc/coredns
+self=/usr/libexec/coredns-subscriptions
+
+get() { uci -q get "$config.$1"; }
+
+case "${1:-}" in
+	scheduled)
+		[ "$(get enabled || :)" = 1 ] || exit 0
+		case "$(get frequency || :)" in
+		daily) ;;
+		weekly|'') [ "$(get weekday || :)" = "$(date +%w)" ] || exit 0 ;;
+		*) exit 0 ;;
+		esac
+		hour=$(date +%H)
+		[ "$(get hour || :)" = "${hour#0}" ] || exit 0
+		;;
+	queue)
+		"$self" update </dev/null >/dev/null 2>&1 &
+		exit 0
+		;;
+	update) ;;
+	*) exit 2 ;;
+esac
+
+umask 077
+exec 9>/var/lock/coredns-subscriptions.lock
+flock -n 9 || exit 0
+
+status() {
+	local file
+	file=$(mktemp /tmp/coredns-subscriptions.XXXXXX) || return 1
+	printf '%s\n' "$1" > "$file" && mv -f "$file" "$state"
+}
+
+fail() {
+	status "$1"
+	logger -t coredns-subscriptions "$1"
+	exit 1
+}
+
+download() {
+	local url=$1 output=$2
+	case "$url" in
+		https://?*) ;;
+		*) return 1 ;;
+	esac
+	case "$url" in *[[:space:][:cntrl:]]*) return 1 ;; esac
+	# Bound download size and wall time; do not pass user input through a shell command string.
+	(ulimit -f 32768; timeout -k 5 60 /bin/uclient-fetch --no-proxy -q -T 15 -O "$output" "$url")
+}
+
+status running
+work=$(mktemp -d "$root/.subscriptions.XXXXXX") || fail storage
+trap 'rm -rf "$work"' EXIT
+trap 'fail interrupted' HUP INT TERM
+
+mkdir "$work/new" "$work/old" "$work/touched" || fail storage
+package=${config%.main}
+sections=$(uci -q -X show "$package") || fail invalid_entry
+block=0
+plan=$work/plan
+: > "$plan"
+
+block_entry() {
+	local filename=$1 url=$2 alias=$3 dir key
+	case "$filename" in [A-Za-z0-9]*.txt) ;; *) fail invalid_entry ;; esac
+	case "$filename" in *[!A-Za-z0-9._-]*) fail invalid_entry ;; esac
+	[ "${#filename}" -le 80 ] && [ -n "$alias" ] && [ -n "$url" ] || fail invalid_entry
+	[ "$filename" != allowlist.txt ] || fail invalid_entry
+	dir=adblock
+	block=1
+	key=$dir/$filename
+	[ ! -e "$work/new/$key" ] || fail duplicate_file
+	mkdir -p "$work/new/$dir" "$work/old/$dir" "$work/touched/$dir" || fail storage
+	if ! download "$url" "$work/new/$key" || ! /usr/bin/coredns -check-blocklist "$work/new/$key"; then
+		logger -t coredns-subscriptions "Failed subscription: $key"
+		fail block_failed
+	fi
+	printf '%s\n' "$key" >> "$plan"
+}
+
+geosite_source=$(get geosite_source || echo github)
+if [ "$(get routing_enabled || echo 1)" = 1 ] && [ "$geosite_source" != disabled ]; then
+	case "$geosite_source" in
+		github) url=https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat ;;
+		jsdelivr) url=https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat ;;
+		custom) url=$(get geosite_url || :) ;;
+		*) fail geosite_failed ;;
+	esac
+	candidate=$work/new/geosite.dat
+	download "$url" "$candidate" || fail geosite_failed
+	if ! /usr/bin/coredns -check-geosite "$candidate" "$root/local.txt" "$root/remote.txt" > "$work/validation" 2>&1; then
+		logger -t coredns-subscriptions "GeoSite validation failed: $(head -c 512 "$work/validation")"
+		fail geosite_failed
+	fi
+	printf '%s\n' geosite.dat >> "$plan"
+fi
+
+# -X provides the real section identifiers even for anonymous LuCI rows.
+if [ "$(get blocking_enabled || echo 1)" = 1 ]; then
+for section in $(printf '%s\n' "$sections" | awk -F '[.=]' '
+	NF == 3 && $2 ~ /^[A-Za-z0-9_]+$/ && $3 == "block" { print $2 }
+'); do
+	prefix=$package.$section
+	group=$(uci -q get "$prefix" || :)
+	[ "$group" = block ] || continue
+	[ "$(uci -q get "$prefix.enabled" || :)" = 1 ] || continue
+	block_entry "$(uci -q get "$prefix.filename" || :)" \
+		"$(uci -q get "$prefix.url" || :)" "$(uci -q get "$prefix.alias" || :)"
+done
+fi
+[ -s "$plan" ] || fail no_sources
+
+# Back up existing files after every download succeeds; remember new files too.
+while IFS= read -r key; do
+	target=$root/$key
+	[ ! -L "$target" ] || fail storage
+	if [ -e "$target" ]; then
+		[ -f "$target" ] && cp -p "$target" "$work/old/$key" || fail storage
+	fi
+done < "$plan"
+
+rollback() {
+	local ok=0 key
+	while IFS= read -r key; do
+		[ -e "$work/touched/$key" ] || continue
+		if [ -f "$work/old/$key" ]; then
+			mv -f "$work/old/$key" "$root/$key" || ok=1
+		else
+			rm -f "$root/$key" || ok=1
+		fi
+	done < "$plan"
+	if [ "$ok" != 0 ]; then
+		trap - EXIT
+		logger -t coredns-subscriptions "Rule backups retained in $work"
+		fail rollback_failed
+	fi
+}
+trap 'rollback; fail interrupted' HUP INT TERM
+while IFS= read -r key; do
+	{ touch "$work/touched/$key" && mv -f "$work/new/$key" "$root/$key"; } || { rollback; fail storage; }
+done < "$plan"
+if [ "$block" = 1 ] && [ "$(uci -q get coredns.main.enabled || :)" = 1 ] && /etc/init.d/coredns running; then
+	/usr/bin/coredns -check-config "$root/Corefile" >/dev/null 2>&1 || { rollback; fail config_failed; }
+fi
+status success
+logger -t coredns-subscriptions 'Subscription rules updated'

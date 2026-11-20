@@ -1,0 +1,88 @@
+name: Verify and build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./... && ./test/run-whitebox.sh && go vet ./...
+      - run: |
+          find luci -name '*.js' -exec sh -c 'for f do node --check "$f" || exit; done' sh {} +
+          sh -n build-apk.sh
+          for script in scripts/*.sh; do sh -n "$script"; done
+          sh -n net/coredns/files/coredns.init
+          find luci -type f \( -path '*/etc/init.d/*' -o -path '*/etc/uci-defaults/*' -o -path '*/usr/libexec/*' \) -exec sh -c 'for f do sh -n "$f" || exit; done' sh {} +
+
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: mips, goarch: mips, target: ath79/generic, apkarch: mips_24kc }
+          - { arch: mipsel, goarch: mipsle, target: ramips/mt7621, apkarch: mipsel_24kc }
+          - { arch: x86, goarch: '386', target: x86/generic, apkarch: i386_pentium4 }
+          - { arch: amd64, goarch: amd64, target: x86/64, apkarch: x86_64 }
+          - { arch: arm64, goarch: arm64, target: armsr/armv8, apkarch: aarch64_generic }
+          - { arch: mips64-octeonplus, goarch: mips64, target: octeon/generic, apkarch: mips64_octeonplus }
+    env:
+      OPENWRT_VERSION: '25.12.6'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Linux binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: softfloat
+          GOMIPS64: softfloat
+          BIN_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist
+          go build -mod=readonly -buildvcs=false -trimpath -ldflags '-s -w' -o "dist/simplifiedns-linux-$BIN_ARCH" .
+          file "dist/simplifiedns-linux-$BIN_ARCH"
+          sh scripts/collect-licenses.sh dist/licenses
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openwrt-sdk-cache
+          key: openwrt-sdk-${{ env.OPENWRT_VERSION }}-${{ matrix.apkarch }}
+      - name: Install SDK host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang fakeroot flex bison gawk gettext libncurses-dev libssl-dev rsync unzip zlib1g-dev zstd
+      - name: Build OpenWrt APKs
+        env:
+          OPENWRT_TARGET: ${{ matrix.target }}
+          OPENWRT_ARCH: ${{ matrix.apkarch }}
+          OPENWRT_SDK_CACHE: ${{ runner.temp }}/openwrt-sdk-cache
+        run: sh scripts/build-sdk-apk.sh "$OPENWRT_VERSION" "$OPENWRT_TARGET" "$OPENWRT_ARCH" "$PWD/dist"
+      - name: Record checksums
+        run: cd dist && find simplifiedns-linux-* *.apk licenses -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simplifiedns-${{ matrix.arch }}-openwrt-${{ env.OPENWRT_VERSION }}
+          path: dist/
+          if-no-files-found: error

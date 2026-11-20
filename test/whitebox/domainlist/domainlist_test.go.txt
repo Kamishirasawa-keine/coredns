@@ -1,0 +1,26 @@
+package domainlist
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestRejectLegacyRuleFormats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "direct.txt")
+	for _, line := range []string{"example.com", "domain:example.com", "full:example.com", "keyword:tracker", "regexp:^ads", "||example.com^"} {
+		if err := os.WriteFile(path, []byte("# comment\n"+line+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFiles([]string{path}); err == nil || !strings.Contains(err.Error(), ":2: expected geosite:<category>") {
+			t.Errorf("rule %q: unexpected error %v", line, err)
+		}
+	}
+}
+
+func TestLoadMissingFileFails(t *testing.T) {
+	if _, err := LoadFiles([]string{filepath.Join(t.TempDir(), "nope.txt")}); err == nil {
+		t.Fatal("expected an error for a missing rule file")
+	}
+}

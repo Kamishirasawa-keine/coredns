@@ -1,0 +1,25 @@
+.:53 {
+    bind ::
+    prometheus 127.0.0.1:9153
+    errors
+    bufsize 1232
+    blocklist /etc/coredns/adblock/blocklist.txt {
+        block_response nxdomain
+        allowlist /etc/coredns/adblock/allowlist.txt
+    }
+    cache {
+        success 32768 86400 5
+        denial 32768 3600 5
+        serve_stale 86400s immediate 30s
+    }
+    splitroute {
+        mode remote_first
+        reload 10m
+        # Add a local group if split routing is needed.
+        remote https://1.1.1.1/dns-query https://1.0.0.1/dns-query {
+            concurrent 2
+            timeout 5s
+            tls-servername cloudflare-dns.com
+        }
+    }
+}

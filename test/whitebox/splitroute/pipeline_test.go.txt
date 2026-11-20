@@ -1,0 +1,78 @@
+package splitroute
+
+import (
+	"crypto/tls"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+func TestDoTPipelineOutOfOrder(t *testing.T) {
+	sample := httptest.NewTLSServer(nil)
+	cfg := sample.TLS.Clone()
+	sample.Close()
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := make(chan error, 1)
+	go func() {
+		raw, err := listener.Accept()
+		if err != nil {
+			server <- err
+			return
+		}
+		defer raw.Close()
+		_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+		conn := &dns.Conn{Conn: raw}
+		a, err := conn.ReadMsg()
+		if err != nil {
+			server <- err
+			return
+		}
+		b, err := conn.ReadMsg()
+		if err != nil {
+			server <- err
+			return
+		}
+		if err := conn.WriteMsg(new(dns.Msg).SetReply(b)); err != nil {
+			server <- err
+			return
+		}
+		server <- conn.WriteMsg(new(dns.Msg).SetReply(a))
+	}()
+	u, err := newUpstream("tls://"+listener.Addr().String(), "remote", 2*time.Second, "example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.enablePipeline("example.com", true, "", 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	defer u.pipeline.stop()
+	type result struct {
+		name string
+		msg  *dns.Msg
+		err  error
+	}
+	replies := make(chan result, 2)
+	for _, name := range []string{"one.example.", "two.example."} {
+		go func() {
+			q := new(dns.Msg).SetQuestion(name, dns.TypeA)
+			q.Id = 42
+			m, err := u.pipeline.exchange(t.Context(), q)
+			replies <- result{name, m, err}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		r := <-replies
+		if r.err != nil || r.msg == nil || r.msg.Id != 42 || r.msg.Question[0].Name != r.name {
+			t.Fatalf("%s: msg=%v err=%v", r.name, r.msg, r.err)
+		}
+	}
+	if err := <-server; err != nil {
+		t.Fatal(err)
+	}
+}

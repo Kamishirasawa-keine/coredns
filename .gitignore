@@ -1,0 +1,5 @@
+/AGENTS.md
+/dist/
+/coredns
+*.pid
+*.log

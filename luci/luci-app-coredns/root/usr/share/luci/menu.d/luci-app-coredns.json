@@ -1,0 +1,31 @@
+{
+	"admin/services/coredns": {
+		"title": "CoreDNS",
+		"order": 60,
+		"action": { "type": "firstchild" },
+		"depends": {
+			"acl": [ "luci-app-coredns" ],
+			"uci": { "coredns": true }
+		}
+	},
+	"admin/services/coredns/settings": {
+		"title": "Settings",
+		"order": 10,
+		"action": { "type": "view", "path": "coredns/overview" }
+	},
+	"admin/services/coredns/corefile": {
+		"title": "Corefile",
+		"order": 20,
+		"action": { "type": "view", "path": "coredns/corefile" }
+	},
+	"admin/services/coredns/statistics": {
+		"title": "Statistics",
+		"order": 30,
+		"action": { "type": "view", "path": "coredns/statistics" }
+	},
+	"admin/services/coredns/subscriptions": {
+		"title": "Subscriptions",
+		"order": 40,
+		"action": { "type": "view", "path": "coredns/subscriptions" }
+	}
+}

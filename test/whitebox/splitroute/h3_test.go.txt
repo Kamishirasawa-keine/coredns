@@ -1,0 +1,64 @@
+package splitroute
+
+import (
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/coredns/coredns/request"
+	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go/http3"
+)
+
+func TestHTTP3Upstream(t *testing.T) {
+	tlsServer := httptest.NewTLSServer(nil)
+	cfg := tlsServer.TLS.Clone()
+	tlsServer.Close()
+	socket, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socket.Close()
+	server := &http3.Server{TLSConfig: cfg, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 3 || r.Method != "POST" || r.URL.Path != "/dns-query" || r.Host != "example.com" {
+			t.Errorf("unexpected request: %s %s %s %s", r.Proto, r.Method, r.URL, r.Host)
+			w.WriteHeader(400)
+			return
+		}
+		b, err := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		if err != nil || q.Unpack(b) != nil {
+			w.WriteHeader(400)
+			return
+		}
+		b, err = new(dns.Msg).SetReply(q).Pack()
+		if err != nil {
+			w.WriteHeader(500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(b)
+	})}
+	done := make(chan struct{})
+	go func() { defer close(done); _ = server.Serve(socket) }()
+	defer func() { _ = server.Close(); <-done }()
+	bootstrap := newTestUpstream(t, "127.0.0.1")
+	_, port, _ := net.SplitHostPort(socket.LocalAddr().String())
+	spec := "h3://bootstrap-test.invalid:" + port + "/dns-query"
+	u, err := newUpstream(spec, "remote", 2*time.Second, "example.com", true, bootstrap.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.spec != spec {
+		t.Fatalf("metric endpoint = %s", u.spec)
+	}
+	defer u.h3.Close()
+	q := new(dns.Msg).SetQuestion("h3.example.", dns.TypeA)
+	m, _, _, err := u.proxy.Connect(t.Context(), request.Request{Req: q}, u.opts)
+	if err != nil || m == nil || m.Id != q.Id || m.Rcode != dns.RcodeSuccess {
+		t.Fatalf("HTTP/3 response=%v err=%v", m, err)
+	}
+}

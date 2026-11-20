@@ -1,0 +1,20 @@
+{
+	"luci-app-coredns": {
+		"description": "Grant access to the CoreDNS control page",
+		"read": {
+			"ubus": {
+				"service": [ "list" ],
+				"luci.coredns": [ "get_corefile", "get_metrics", "subscription_status" ]
+			},
+			"uci": [ "coredns", "coredns-subscriptions" ]
+		},
+		"write": {
+			"ubus": { "luci.coredns": [ "save_corefile", "update_subscriptions" ] },
+			"file": {
+				"/usr/bin/coredns -check-config /etc/coredns/Corefile": [ "exec" ],
+				"/etc/init.d/coredns restart": [ "exec" ]
+			},
+			"uci": [ "coredns", "coredns-subscriptions" ]
+		}
+	}
+}

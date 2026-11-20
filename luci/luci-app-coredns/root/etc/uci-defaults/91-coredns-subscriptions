@@ -1,0 +1,26 @@
+#!/bin/sh
+# Convert r7's blocking URL without changing any existing rule files.
+set -e
+package=coredns-subscriptions
+prefix=$package.main
+
+migrate() {
+	local group=$1 old=$2 filename=$3 label=$4 url section
+	url=$(uci -q get "$prefix.$old") || return 0
+	if [ -n "$url" ]; then
+		section=$(uci add "$package" "$group")
+		uci set "$package.$section.alias=$label"
+		uci set "$package.$section.filename=$filename"
+		uci set "$package.$section.url=$url"
+		uci set "$package.$section.enabled=1"
+	fi
+	uci delete "$prefix.$old"
+}
+
+uci -q get "$prefix" >/dev/null || exit 0
+migrate block block_url blocklist.txt 'Blocking rules'
+if enabled=$(uci -q get "$prefix.geosite_enabled"); then
+	[ "$enabled" != 0 ] || uci set "$prefix.geosite_source=disabled"
+	uci delete "$prefix.geosite_enabled"
+fi
+uci commit "$package"

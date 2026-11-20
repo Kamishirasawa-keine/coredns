@@ -1,0 +1,125 @@
+package splitroute
+
+import (
+	"crypto/tls"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/coredns/coredns/request"
+	"github.com/miekg/dns"
+)
+
+func TestHostPort(t *testing.T) {
+	cases := []struct {
+		host string
+		def  string
+		want string
+	}{
+		{"1.2.3.4", "53", "1.2.3.4:53"},
+		{"1.2.3.4:5353", "53", "1.2.3.4:5353"},
+		{"2606:4700:4700::1111", "853", "[2606:4700:4700::1111]:853"},
+		{"[2606:4700:4700::1111]", "853", "[2606:4700:4700::1111]:853"},
+		{"[2606:4700:4700::1111]:5353", "853", "[2606:4700:4700::1111]:5353"},
+		{"dns.example", "53", "dns.example:53"},
+	}
+	for _, c := range cases {
+		got, err := hostPort(c.host, c.def)
+		if err != nil {
+			t.Errorf("hostPort(%q): %v", c.host, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("hostPort(%q) = %q, want %q", c.host, got, c.want)
+		}
+	}
+	if _, err := hostPort("", "53"); err == nil {
+		t.Error("empty host must fail")
+	}
+}
+
+// Observe the wire using a TLS listener with no server certificate: the
+// handshake cannot succeed, but GetConfigForClient sees the ClientHello.
+func TestDefaultTLSUpstreamStartsTLSHandshake(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	hello := make(chan struct{}, 1)
+	srv := &dns.Server{Listener: tls.NewListener(ln, &tls.Config{
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			hello <- struct{}{}
+			return nil, net.ErrClosed
+		},
+	})}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() { _ = srv.ActivateAndServe() }()
+	<-ready
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	u, err := newUpstream("tls://"+ln.Addr().String(), "remote", time.Second, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.proxy.Start(time.Second)
+	t.Cleanup(u.proxy.Stop)
+	_, _, _, err = u.proxy.Connect(t.Context(), request.Request{Req: testQuery("wire.test")}, u.opts)
+	if err == nil {
+		t.Fatal("connection unexpectedly succeeded without a server certificate")
+	}
+	select {
+	case <-hello:
+	default:
+		t.Fatalf("no TLS ClientHello observed; exchange error: %v", err)
+	}
+}
+
+func TestDoTBootstrap(t *testing.T) {
+	resolver := newTestUpstream(t, "127.0.0.1")
+	u, err := newUpstream("tls://bootstrap-test.invalid", "remote", time.Second, "", false, resolver.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.bootstrap.stop()
+	p, err := u.queryProxy(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Addr() != "127.0.0.1:853" || u.bootstrap.serverName != "bootstrap-test.invalid" {
+		t.Fatalf("address=%s TLS name=%s", p.Addr(), u.bootstrap.serverName)
+	}
+}
+
+func TestNewUpstream(t *testing.T) {
+	cases := []struct {
+		spec string
+		want string // normalised spec
+		tcp  bool
+	}{
+		{"1.2.3.4", "udp://1.2.3.4:53", false},
+		{"udp://202.96.134.33", "udp://202.96.134.33:53", false},
+		{"tcp://1.2.3.4", "tcp://1.2.3.4:53", true},
+		{"tls://1.1.1.1", "tls://1.1.1.1:853", true},
+		{"tls://2606:4700:4700::1111", "tls://[2606:4700:4700::1111]:853", true},
+	}
+	for _, c := range cases {
+		u, err := newUpstream(c.spec, "remote", 2*time.Second, "", false)
+		if err != nil {
+			t.Errorf("newUpstream(%q): %v", c.spec, err)
+			continue
+		}
+		if u.spec != c.want {
+			t.Errorf("newUpstream(%q).spec = %q, want %q", c.spec, u.spec, c.want)
+		}
+		if u.opts.ForceTCP != c.tcp {
+			t.Errorf("newUpstream(%q).ForceTCP = %v, want %v", c.spec, u.opts.ForceTCP, c.tcp)
+		}
+		u.proxy.Stop()
+	}
+
+	if _, err := newUpstream("http://1.1.1.1/dns-query", "remote", time.Second, "", false); err == nil {
+		t.Error("unsupported scheme must be rejected")
+	}
+}

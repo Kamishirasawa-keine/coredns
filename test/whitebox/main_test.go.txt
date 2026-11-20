@@ -1,0 +1,38 @@
+package main
+
+import (
+	"slices"
+	"testing"
+
+	"github.com/coredns/coredns/core/dnsserver"
+)
+
+func TestDirectiveOrderMatchesMosdnsPipeline(t *testing.T) {
+	block := slices.Index(dnsserver.Directives, "blocklist")
+	cache := slices.Index(dnsserver.Directives, "cache")
+	route := slices.Index(dnsserver.Directives, "splitroute")
+	if block < 0 || cache < 0 || route < 0 {
+		t.Fatalf("missing directive: blocklist=%d cache=%d splitroute=%d", block, cache, route)
+	}
+	if block >= cache {
+		t.Fatalf("blocklist must run before cache, got %d >= %d", block, cache)
+	}
+	if cache >= route {
+		t.Fatalf("cache must wrap splitroute, got %d >= %d", cache, route)
+	}
+}
+
+func TestInsertBefore(t *testing.T) {
+	base := []string{"errors", "cache", "forward"}
+	got := insertBefore(base, "cache", "blocklist")
+	want := []string{"errors", "blocklist", "cache", "forward"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("insertBefore = %v, want %v", got, want)
+	}
+	if again := insertBefore(got, "cache", "blocklist"); !slices.Equal(again, want) {
+		t.Fatalf("insertion is not idempotent: %v", again)
+	}
+	if missing := insertBefore(base, "missing", "last"); !slices.Equal(missing, []string{"errors", "cache", "forward", "last"}) {
+		t.Fatalf("missing anchor must append: %v", missing)
+	}
+}

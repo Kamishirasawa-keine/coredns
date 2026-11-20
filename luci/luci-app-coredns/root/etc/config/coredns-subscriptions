@@ -1,0 +1,7 @@
+config subscription 'main'
+	option enabled '0'
+	option frequency 'weekly'
+	option weekday '0'
+	option hour '4'
+	option geosite_source 'github'
+	option geosite_url ''
