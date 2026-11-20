@@ -3,8 +3,8 @@
     prometheus 127.0.0.1:9153
     errors
     bufsize 1232
-    blocklist /etc/coredns/adblock/blocklist.txt {
-        block_response nxdomain
+    blocklist rule.txt {
+        block_response NXDOMAIN
         allowlist /etc/coredns/adblock/allowlist.txt
     }
     cache {
@@ -15,11 +15,17 @@
     splitroute {
         mode remote_first
         reload 10m
-        # Add a local group if split routing is needed.
-        remote https://1.1.1.1/dns-query https://1.0.0.1/dns-query {
+        fallback 500ms
+#        bootstrap-dns 2400:3200::1
+        local udp://[2400:3200::1] {
+            concurrent 2
+            timeout 2s
+            ignore-rcode SERVFAIL
+        }
+        remote tls://[2606:4700:4700::1111] tls://[2606:4700:4700::1001] {
             concurrent 2
             timeout 5s
-            tls-servername cloudflare-dns.com
+            pipeline
         }
     }
 }
