@@ -1,0 +1,74 @@
+name: Build Octeon COP2
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      OPENWRT_VERSION: '25.12.6'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Octeon COP2 Go toolchain
+        env:
+          COP2_REV: 18d82a1c89925df2f1037f51b79628370affcda1
+        run: |
+          toolchain="$RUNNER_TEMP/go-cop2"
+          git init "$toolchain"
+          git -C "$toolchain" fetch --depth=1 https://github.com/Kamishirasawa-keine/go.git "$COP2_REV"
+          git -C "$toolchain" checkout --detach FETCH_HEAD
+          test "$(git -C "$toolchain" rev-parse HEAD)" = "$COP2_REV"
+          bootstrap=$(go env GOROOT)
+          (cd "$toolchain/src" && unset GOROOT && GOROOT_BOOTSTRAP="$bootstrap" ./make.bash)
+          test "$(env -u GOROOT "$toolchain/bin/go" env GOROOT)" = "$toolchain"
+          echo "COREDNS_COP2_GO=$toolchain/bin/go" >> "$GITHUB_ENV"
+      - name: Build COP2 Linux binary
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: mips64
+          GOMIPS64: softfloat
+          GOFIPS140: 'off'
+          GOTOOLCHAIN: local
+          GOFLAGS: ''
+        run: |
+          unset GOROOT
+          mkdir -p dist
+          binary=dist/simplifiedns-linux-mips64-octeonplus-cop2
+          "$COREDNS_COP2_GO" build -mod=readonly -buildvcs=false -trimpath -tags=octeoncop2 -ldflags '-s -w' -o "$binary" .
+          "$COREDNS_COP2_GO" version -m "$binary" | grep -F -- '-tags=octeoncop2'
+          GO_BIN="$COREDNS_COP2_GO" GOFLAGS=-tags=octeoncop2 sh scripts/collect-licenses.sh dist/licenses
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openwrt-sdk-cache
+          key: openwrt-sdk-${{ env.OPENWRT_VERSION }}-mips64_octeonplus
+      - name: Install SDK host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang fakeroot flex bison gawk gettext libncurses-dev libssl-dev rsync unzip zlib1g-dev zstd
+      - name: Build OpenWrt APKs
+        env:
+          OPENWRT_TARGET: octeon/generic
+          OPENWRT_ARCH: mips64_octeonplus
+          OPENWRT_SDK_CACHE: ${{ runner.temp }}/openwrt-sdk-cache
+        run: |
+          unset GOROOT
+          sh scripts/build-sdk-apk.sh "$OPENWRT_VERSION" "$OPENWRT_TARGET" "$OPENWRT_ARCH" "$PWD/dist"
+      - name: Record checksums
+        run: cd dist && find simplifiedns-linux-* *.apk licenses* -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simplifiedns-mips64-octeonplus-cop2-openwrt-${{ env.OPENWRT_VERSION }}
+          path: dist/
+          if-no-files-found: error
