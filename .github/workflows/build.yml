@@ -68,7 +68,7 @@ jobs:
           go build -mod=readonly -buildvcs=false -trimpath -ldflags '-s -w' -o "$binary" .
           file "$binary"
           sh scripts/collect-licenses.sh dist/licenses
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/openwrt-sdk-cache
           key: openwrt-sdk-${{ env.OPENWRT_VERSION }}-${{ matrix.apkarch }}

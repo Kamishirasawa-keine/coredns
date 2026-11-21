@@ -49,7 +49,7 @@ jobs:
           "$COREDNS_COP2_GO" build -mod=readonly -buildvcs=false -trimpath -tags=octeoncop2 -ldflags '-s -w' -o "$binary" .
           "$COREDNS_COP2_GO" version -m "$binary" | grep -F -- '-tags=octeoncop2'
           GO_BIN="$COREDNS_COP2_GO" GOFLAGS=-tags=octeoncop2 sh scripts/collect-licenses.sh dist/licenses
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/openwrt-sdk-cache
           key: openwrt-sdk-${{ env.OPENWRT_VERSION }}-mips64_octeonplus
