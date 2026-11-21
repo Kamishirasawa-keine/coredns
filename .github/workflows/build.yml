@@ -52,6 +52,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Build Octeon COP2 Go toolchain
+        if: matrix.apkarch == 'mips64_octeonplus'
+        env:
+          COP2_REV: 18d82a1c89925df2f1037f51b79628370affcda1
+        run: |
+          toolchain="$RUNNER_TEMP/go-cop2"
+          git init "$toolchain"
+          git -C "$toolchain" fetch --depth=1 https://github.com/Kamishirasawa-keine/go.git "$COP2_REV"
+          git -C "$toolchain" checkout --detach FETCH_HEAD
+          test "$(git -C "$toolchain" rev-parse HEAD)" = "$COP2_REV"
+          bootstrap=$(go env GOROOT)
+          (cd "$toolchain/src" && unset GOROOT && GOROOT_BOOTSTRAP="$bootstrap" ./make.bash)
+          test "$(env -u GOROOT "$toolchain/bin/go" env GOROOT)" = "$toolchain"
+          echo "COREDNS_COP2_GO=$toolchain/bin/go" >> "$GITHUB_ENV"
       - name: Build Linux binary
         env:
           CGO_ENABLED: '0'
@@ -62,9 +76,18 @@ jobs:
           BIN_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
-          go build -mod=readonly -buildvcs=false -trimpath -ldflags '-s -w' -o "dist/simplifiedns-linux-$BIN_ARCH" .
-          file "dist/simplifiedns-linux-$BIN_ARCH"
+          export GOFLAGS= GOTOOLCHAIN=local
+          unset GOROOT
+          binary="dist/simplifiedns-linux-$BIN_ARCH"
+          go build -mod=readonly -buildvcs=false -trimpath -ldflags '-s -w' -o "$binary" .
+          file "$binary"
           sh scripts/collect-licenses.sh dist/licenses
+          if [[ -n ${COREDNS_COP2_GO:-} ]]; then
+            export GOFIPS140=off
+            "$COREDNS_COP2_GO" build -mod=readonly -buildvcs=false -trimpath -tags=octeoncop2 -ldflags '-s -w' -o "$binary-cop2" .
+            "$COREDNS_COP2_GO" version -m "$binary-cop2" | grep -F -- '-tags=octeoncop2'
+            GO_BIN="$COREDNS_COP2_GO" GOFLAGS=-tags=octeoncop2 sh scripts/collect-licenses.sh dist/licenses-cop2
+          fi
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/openwrt-sdk-cache
@@ -78,11 +101,13 @@ jobs:
           OPENWRT_TARGET: ${{ matrix.target }}
           OPENWRT_ARCH: ${{ matrix.apkarch }}
           OPENWRT_SDK_CACHE: ${{ runner.temp }}/openwrt-sdk-cache
-        run: sh scripts/build-sdk-apk.sh "$OPENWRT_VERSION" "$OPENWRT_TARGET" "$OPENWRT_ARCH" "$PWD/dist"
+        run: |
+          unset GOROOT
+          sh scripts/build-sdk-apk.sh "$OPENWRT_VERSION" "$OPENWRT_TARGET" "$OPENWRT_ARCH" "$PWD/dist"
       - name: Record checksums
-        run: cd dist && find simplifiedns-linux-* *.apk licenses -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+        run: cd dist && find simplifiedns-linux-* *.apk licenses* -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: simplifiedns-${{ matrix.arch }}-openwrt-${{ env.OPENWRT_VERSION }}
+          name: simplifiedns-${{ matrix.arch }}${{ matrix.apkarch == 'mips64_octeonplus' && '-cop2' || '' }}-openwrt-${{ env.OPENWRT_VERSION }}
           path: dist/
           if-no-files-found: error

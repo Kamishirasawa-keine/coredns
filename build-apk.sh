@@ -13,6 +13,11 @@ case "${2:-}" in
 esac
 go=${COREDNS_GO:-go}
 case "$go" in /*) ;; *) go=$(command -v "$go") ;; esac
+if [ -n "${COREDNS_COP2_GO:-}" ]; then
+	case "$COREDNS_COP2_GO" in /*) ;; *) echo 'COREDNS_COP2_GO must be an absolute path' >&2; exit 1 ;; esac
+	test -x "$COREDNS_COP2_GO" || { echo 'COREDNS_COP2_GO must point to a built Go toolchain' >&2; exit 1; }
+	unset GOROOT
+fi
 test -f "$openwrt/.config" || { echo 'OpenWrt .config is missing' >&2; exit 1; }
 cd "$openwrt"
 grep -qx CONFIG_USE_APK=y .config || { echo 'OpenWrt CONFIG_USE_APK=y is required' >&2; exit 1; }
@@ -43,4 +48,4 @@ for package in $packages; do
 	fi
 	set -- "$@" "package/feeds/coredns/$package/compile"
 done
-exec make "$@" "COREDNS_GO=$go" V=s
+exec make "$@" "COREDNS_GO=$go" "COREDNS_COP2_GO=${COREDNS_COP2_GO:-}" V=s

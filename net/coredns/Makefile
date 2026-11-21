@@ -6,10 +6,15 @@ PKG_RELEASE:=18
 PKG_LICENSE:=BSD-3-Clause AND Apache-2.0 AND BSD-2-Clause AND MIT AND MPL-2.0
 PKG_LICENSE_FILES:=LICENSE
 PKG_BUILD_PARALLEL:=1
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+PKG_BUILD_DIR=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)$(if $(COREDNS_BUILD_TAGS),-cop2)
 COREDNS_SOURCE:=$(realpath $(CURDIR)/../..)
 PKG_FILE_DEPENDS:=$(addprefix $(COREDNS_SOURCE)/,go.mod go.sum main.go plugin LICENSE THIRD_PARTY.md licenses scripts/collect-licenses.sh)
 COREDNS_GO?=go
+# Set only for an Octeon deployment with verified user-space AES/GFM support.
+COREDNS_COP2_GO?=
+COREDNS_BUILD_GO=$(if $(filter mips64_octeonplus,$(ARCH_PACKAGES)),$(or $(COREDNS_COP2_GO),$(COREDNS_GO)),$(COREDNS_GO))
+COREDNS_COP2_FLAGS=$(if $(and $(filter mips64_octeonplus,$(ARCH_PACKAGES)),$(COREDNS_COP2_GO)),GOFIPS140=off)
+COREDNS_BUILD_TAGS=$(if $(COREDNS_COP2_FLAGS),-tags=octeoncop2)
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -20,7 +25,7 @@ define Package/coredns
   SECTION:=net
   CATEGORY:=Network
   SUBMENU:=IP Addresses and Names
-  TITLE:=CoreDNS with domain-based upstream routing
+  TITLE:=CoreDNS with domain-based upstream routing$(if $(COREDNS_BUILD_TAGS), (Octeon COP2))
   URL:=https://coredns.io/
   DEPENDS:=+ca-bundle @mips||mipsel||mips64||mips64el||i386||aarch64||x86_64
 endef
@@ -55,9 +60,9 @@ define Build/Compile
 		GOENV=off GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=$(COREDNS_GO_ARCH) \
 		$(if $(filter mips mipsle,$(COREDNS_GO_ARCH)),GOMIPS=softfloat) \
 		$(if $(filter mips64 mips64le,$(COREDNS_GO_ARCH)),GOMIPS64=softfloat) \
-		"$(COREDNS_GO)" build -mod=readonly -buildvcs=false -trimpath -ldflags '-s -w' -o coredns .
+		GOFLAGS= $(COREDNS_COP2_FLAGS) "$(COREDNS_BUILD_GO)" build $(COREDNS_BUILD_TAGS) -mod=readonly -buildvcs=false -trimpath -ldflags '-s -w' -o coredns .
 	cd $(PKG_BUILD_DIR) && GOENV=off GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=$(COREDNS_GO_ARCH) \
-		GO_BIN="$(COREDNS_GO)" sh "$(COREDNS_SOURCE)/scripts/collect-licenses.sh" license-bundle
+		GOFLAGS="$(COREDNS_BUILD_TAGS)" $(COREDNS_COP2_FLAGS) GO_BIN="$(COREDNS_BUILD_GO)" sh "$(COREDNS_SOURCE)/scripts/collect-licenses.sh" license-bundle
 endef
 
 define Package/coredns/install
