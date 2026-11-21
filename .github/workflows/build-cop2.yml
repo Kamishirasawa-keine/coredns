@@ -67,7 +67,7 @@ jobs:
           sh scripts/build-sdk-apk.sh "$OPENWRT_VERSION" "$OPENWRT_TARGET" "$OPENWRT_ARCH" "$PWD/dist"
       - name: Record checksums
         run: cd dist && find simplifiedns-linux-* *.apk licenses* -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: simplifiedns-mips64-octeonplus-cop2-openwrt-${{ env.OPENWRT_VERSION }}
           path: dist/
