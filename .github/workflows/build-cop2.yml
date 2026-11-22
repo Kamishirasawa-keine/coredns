@@ -22,7 +22,7 @@ jobs:
           go-version-file: go.mod
       - name: Build Octeon COP2 Go toolchain
         env:
-          COP2_REV: 3959fc9655cd482c7f9654e9ecd2187fd5ec3907
+          COP2_REV: 94ba46baf8
         run: |
           toolchain="$RUNNER_TEMP/go-cop2"
           git init "$toolchain"
