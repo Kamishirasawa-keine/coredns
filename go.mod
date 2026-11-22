@@ -7,7 +7,7 @@ require (
 	github.com/coredns/coredns v1.15.0
 	github.com/miekg/dns v1.1.73
 	github.com/prometheus/client_golang v1.25.0
-	github.com/quic-go/quic-go v0.64.1
+	github.com/quic-go/quic-go v0.65.0
 	google.golang.org/protobuf v1.36.12
 )
 
