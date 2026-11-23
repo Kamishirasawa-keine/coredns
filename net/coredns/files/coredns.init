@@ -8,6 +8,10 @@ start_service() {
 	config_get_bool enabled main enabled 0
 	[ "$enabled" -eq 1 ] || return 0
 
+	# Do not start while WAN is still negotiating; otherwise early client
+	# queries create a burst of avoidable upstream failures.
+	[ "$(ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null)" = true ] || return 0
+
 	/usr/bin/coredns -check-config /etc/coredns/Corefile || return 1
 	procd_open_instance
 	procd_set_param command /usr/bin/coredns -conf /etc/coredns/Corefile
@@ -19,4 +23,5 @@ start_service() {
 
 service_triggers() {
 	procd_add_reload_trigger coredns
+	procd_add_interface_trigger "interface.*" wan /etc/init.d/coredns restart
 }

@@ -29,7 +29,7 @@ define Package/coredns
   SUBMENU:=IP Addresses and Names
   TITLE:=CoreDNS with domain-based upstream routing$(if $(COREDNS_BUILD_TAGS), (Octeon COP2))
   URL:=https://coredns.io/
-  DEPENDS:=+ca-bundle @mips||mipsel||mips64||mips64el||i386||aarch64||x86_64
+  DEPENDS:=+ca-bundle +jsonfilter @mips||mipsel||mips64||mips64el||i386||aarch64||x86_64
 endef
 
 define Package/coredns/config
