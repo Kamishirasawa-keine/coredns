@@ -15,14 +15,15 @@ import (
 // dotPipeline has a single reader per TLS connection and serializes only writes.
 // Responses are dispatched by their wire ID, not by arrival order.
 type dotPipeline struct {
-	addr    string
-	tls     *tls.Config
-	dialer  net.Dialer
-	timeout time.Duration
-	mu      sync.Mutex
-	session *pipelineSession
-	stopped bool
-	gate    chan struct{}
+	addr        string
+	tls         *tls.Config
+	dialer      net.Dialer
+	dialContext func(context.Context, string, string) (net.Conn, error)
+	timeout     time.Duration
+	mu          sync.Mutex
+	session     *pipelineSession
+	stopped     bool
+	gate        chan struct{}
 }
 
 type pipelineResult struct {
@@ -60,7 +61,11 @@ func (p *dotPipeline) get(ctx context.Context) (*pipelineSession, error) {
 			return s, nil
 		}
 	}
-	c, err := (&tls.Dialer{NetDialer: &p.dialer, Config: p.tls}).DialContext(ctx, "tcp", p.addr)
+	dial := p.dialContext
+	if dial == nil {
+		dial = (&tls.Dialer{NetDialer: &p.dialer, Config: p.tls}).DialContext
+	}
+	c, err := dial(ctx, "tcp", p.addr)
 	if err != nil {
 		return nil, err
 	}

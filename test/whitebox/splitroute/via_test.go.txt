@@ -1,0 +1,80 @@
+package splitroute
+
+import (
+	"io"
+	"net"
+	"testing"
+	"time"
+
+	"github.com/coredns/coredns/request"
+	"github.com/miekg/dns"
+)
+
+func TestSOCKS5TCP(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- func() error {
+			c, err := l.Accept()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+			if _, err = io.ReadFull(c, make([]byte, 3)); err != nil {
+				return err
+			}
+			if _, err = c.Write([]byte{5, 0}); err != nil {
+				return err
+			}
+			// CONNECT carries the hostname, not a locally resolved address.
+			cmd := make([]byte, 5)
+			if _, err = io.ReadFull(c, cmd); err != nil {
+				return err
+			}
+			if cmd[0] != 5 || cmd[1] != 1 || cmd[3] != 3 {
+				t.Errorf("unexpected SOCKS CONNECT: %v", cmd)
+				return nil
+			}
+			dst := make([]byte, int(cmd[4])+2)
+			if _, err = io.ReadFull(c, dst); err != nil {
+				return err
+			}
+			if string(dst[:len(dst)-2]) != "upstream.invalid" {
+				t.Errorf("unexpected destination: %q", dst)
+			}
+			if _, err = c.Write([]byte{5, 0, 0, 1, 127, 0, 0, 1, 0, 53}); err != nil {
+				return err
+			}
+			wire := &dns.Conn{Conn: c}
+			q, err := wire.ReadMsg()
+			if err != nil {
+				return err
+			}
+			return wire.WriteMsg(new(dns.Msg).SetReply(q))
+		}()
+	}()
+	addr, err := parseVia([]string{"socks5", l.Addr().String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := newUpstream("tcp://upstream.invalid", "remote", time.Second, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.enableVia(addr, "", false, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	q := new(dns.Msg).SetQuestion("example.test.", dns.TypeA)
+	m, err := u.exchange(t.Context(), request.Request{Req: q})
+	if err != nil || m == nil || m.Id != q.Id {
+		t.Fatalf("SOCKS exchange: %v, %v", m, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

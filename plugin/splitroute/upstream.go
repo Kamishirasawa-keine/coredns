@@ -46,13 +46,14 @@ var (
 // upstream is one configured nameserver: a pooled connection holder plus the
 // per-exchange options that pin it to a transport.
 type upstream struct {
-	proxy      *proxy.Proxy
-	bootstrap  *bootstrapProxy
-	pipeline   *dotPipeline
-	opts       proxy.Options
-	httpClient *http.Client
-	h3         *http3.Transport
-	spec       string // original "scheme://host:port", for logs and metrics
+	proxy       *proxy.Proxy
+	bootstrap   *bootstrapProxy
+	pipeline    *dotPipeline
+	viaExchange func(context.Context, *dns.Msg) (*dns.Msg, error)
+	opts        proxy.Options
+	httpClient  *http.Client
+	h3          *http3.Transport
+	spec        string // original "scheme://host:port", for logs and metrics
 }
 
 // group is a set of upstreams that answer together.
@@ -172,6 +173,9 @@ func (g *group) exchangeOne(ctx context.Context, u *upstream, st request.Request
 func (u *upstream) exchange(ctx context.Context, st request.Request) (*dns.Msg, error) {
 	if u.pipeline != nil {
 		return u.pipeline.exchange(ctx, st.Req)
+	}
+	if u.viaExchange != nil {
+		return u.viaExchange(ctx, st.Req)
 	}
 	p, err := u.queryProxy(ctx)
 	if err != nil {

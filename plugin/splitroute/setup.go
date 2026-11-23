@@ -236,6 +236,7 @@ func (g *group) parseBlock(c *caddy.Controller, args []string) (func(string) err
 	var (
 		serverName string
 		pipeline   bool
+		via        string
 		insecure   bool
 	)
 
@@ -285,6 +286,15 @@ func (g *group) parseBlock(c *caddy.Controller, args []string) (func(string) err
 					}
 					g.ignore[rc] = struct{}{}
 				}
+			case "via":
+				if via != "" {
+					return nil, c.Err("duplicate via option")
+				}
+				var err error
+				via, err = parseVia(oargs)
+				if err != nil {
+					return nil, c.Err(err.Error())
+				}
 			case "pipeline":
 				if len(oargs) != 0 {
 					return nil, c.ArgErr()
@@ -314,6 +324,11 @@ func (g *group) parseBlock(c *caddy.Controller, args []string) (func(string) err
 			}
 			if pipeline {
 				if err := u.enablePipeline(serverName, insecure, bootstrap, g.timeout); err != nil {
+					return err
+				}
+			}
+			if via != "" {
+				if err := u.enableVia(via, serverName, insecure, g.timeout); err != nil {
 					return err
 				}
 			}
