@@ -16,15 +16,18 @@
         mode remote_first
         reload 10m
         fallback 500ms
-#        bootstrap-dns 2400:3200::1
-        local udp://[2400:3200::1] {
-            concurrent 2
+        bootstrap-dns 2400:3200::1
+        local quic://dns.alidns.com tls://dot.pub {
+            concurrent all
             timeout 2s
             ignore-rcode SERVFAIL
         }
-        remote tls://[2606:4700:4700::1111] tls://[2606:4700:4700::1001] {
-            concurrent 2
+        remote https://dns.google/dns-query {
+#            concurrent 2
             timeout 5s
+            via socks5 127.0.0.1:10808
+            ecs4 /24
+            ecs6 /56
             pipeline
         }
     }
