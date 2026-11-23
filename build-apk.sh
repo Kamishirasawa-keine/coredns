@@ -48,4 +48,7 @@ for package in $packages; do
 	fi
 	set -- "$@" "package/feeds/coredns/$package/compile"
 done
-exec make "$@" "COREDNS_GO=$go" "COREDNS_COP2_GO=${COREDNS_COP2_GO:-}" V=s
+if [ -n "${COREDNS_COP2_GO:-}" ]; then
+	set -- "$@" "COREDNS_COP2_GO=$COREDNS_COP2_GO"
+fi
+exec make "$@" "COREDNS_GO=$go" V=s

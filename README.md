@@ -21,7 +21,9 @@
 local 上游.<br/>
 参数:<br/>
 `concurrent`: 并发数. 可接受的值: `(number)`、 `all`<br/>
-`pipeline`: (DoT Only)启用 Query Pipelining.
+`pipeline`: (DoT Only)启用 Query Pipelining. <br/>
+`via` <br/>
+`ecs4/6` <br/>
 
 #### splitroute.remote
 见 local.

@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=coredns
 PKG_VERSION:=1.15.0
-PKG_RELEASE:=19
+PKG_RELEASE:=20
 PKG_LICENSE:=BSD-3-Clause AND Apache-2.0 AND BSD-2-Clause AND MIT AND MPL-2.0
 PKG_LICENSE_FILES:=LICENSE
 PKG_BUILD_PARALLEL:=1
@@ -11,7 +11,9 @@ COREDNS_SOURCE:=$(realpath $(CURDIR)/../..)
 PKG_FILE_DEPENDS:=$(addprefix $(COREDNS_SOURCE)/,go.mod go.sum main.go plugin LICENSE THIRD_PARTY.md licenses scripts/collect-licenses.sh)
 COREDNS_GO?=go
 # Set only for an Octeon deployment with verified user-space AES/GFM support.
-COREDNS_COP2_GO?=
+COP2_GO_ROOT?=$(abspath $(TOPDIR)/../go_cop2/go)
+COREDNS_COP2_GO?=$(if $(CONFIG_COREDNS_OCTEON_COP2),$(COP2_GO_ROOT)/bin/go)
+PKG_CONFIG_DEPENDS:=CONFIG_COREDNS_OCTEON_COP2
 COREDNS_BUILD_GO=$(if $(filter mips64_octeonplus,$(ARCH_PACKAGES)),$(or $(COREDNS_COP2_GO),$(COREDNS_GO)),$(COREDNS_GO))
 COREDNS_COP2_FLAGS=$(if $(and $(filter mips64_octeonplus,$(ARCH_PACKAGES)),$(COREDNS_COP2_GO)),GOFIPS140=off)
 COREDNS_BUILD_TAGS=$(if $(COREDNS_COP2_FLAGS),-tags=octeoncop2)
@@ -28,6 +30,12 @@ define Package/coredns
   TITLE:=CoreDNS with domain-based upstream routing$(if $(COREDNS_BUILD_TAGS), (Octeon COP2))
   URL:=https://coredns.io/
   DEPENDS:=+ca-bundle @mips||mipsel||mips64||mips64el||i386||aarch64||x86_64
+endef
+
+define Package/coredns/config
+	config COREDNS_OCTEON_COP2
+		bool "Build CoreDNS with Octeon COP2 crypto"
+		depends on PACKAGE_coredns && TARGET_octeon_generic_DEVICE_ubnt_edgerouter-4
 endef
 
 ifeq ($(ARCH),aarch64)
