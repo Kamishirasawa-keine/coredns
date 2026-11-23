@@ -28,7 +28,7 @@
             via socks5 127.0.0.1:10808
             ecs4 /24
             ecs6 /56
-            pipeline
+#            pipeline
         }
     }
 }
