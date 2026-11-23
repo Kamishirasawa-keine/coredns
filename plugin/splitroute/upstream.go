@@ -63,6 +63,7 @@ type group struct {
 	concurrent int
 	timeout    time.Duration
 	ignore     map[int]struct{}
+	ecs4, ecs6 *ecsPrefix
 
 	rr uint32 // rotation counter, keeps the fan-out fair
 }
@@ -120,12 +121,26 @@ func (g *group) exchange(ctx context.Context, state request.Request) (*dns.Msg, 
 	}
 	ch := make(chan result, n)
 
+	configuredECS := g.ecs4 != nil || g.ecs6 != nil
+	var ecs *dns.EDNS0_SUBNET
+	if configuredECS {
+		ecs = g.queryECS(ctx, state.Req.Question[0].Qtype)
+	}
 	start := int(atomic.AddUint32(&g.rr, 1) % uint32(len(g.upstreams)))
 	for i := 0; i < n; i++ {
 		u := g.upstreams[(start+i)%len(g.upstreams)]
 		// Every branch needs its own copy of the query: proxy.Connect rewrites
 		// the message id in place and would otherwise race with its siblings.
 		req := state.Req.Copy()
+		if configuredECS {
+			if ecs == nil {
+				stripECS(req)
+			} else {
+				copy := *ecs
+				copy.Address = append(net.IP(nil), ecs.Address...)
+				addECS(req, &copy)
+			}
+		}
 		st := request.Request{W: state.W, Req: req}
 		go func(u *upstream) {
 			msg, err := g.exchangeOne(cctx, u, st)
@@ -147,6 +162,9 @@ func (g *group) exchange(ctx context.Context, state request.Request) (*dns.Msg, 
 			case g.ignored(res.msg.Rcode):
 				lastErr = fmt.Errorf("upstream answered %s, dropped", rcodeName(res.msg.Rcode))
 			default:
+				if configuredECS {
+					stripECS(res.msg)
+				}
 				return res.msg, nil
 			}
 		}

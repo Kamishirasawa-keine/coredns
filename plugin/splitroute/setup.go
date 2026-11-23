@@ -286,6 +286,22 @@ func (g *group) parseBlock(c *caddy.Controller, args []string) (func(string) err
 					}
 					g.ignore[rc] = struct{}{}
 				}
+			case "ecs4", "ecs6":
+				if len(oargs) != 1 {
+					return nil, c.ArgErr()
+				}
+				family, dst := uint16(1), &g.ecs4
+				if opt == "ecs6" {
+					family, dst = 2, &g.ecs6
+				}
+				if *dst != nil {
+					return nil, c.Errf("duplicate %s option", opt)
+				}
+				prefix, err := parseECS(oargs[0], family)
+				if err != nil {
+					return nil, c.Errf("%s: %v", opt, err)
+				}
+				*dst = prefix
 			case "via":
 				if via != "" {
 					return nil, c.Err("duplicate via option")

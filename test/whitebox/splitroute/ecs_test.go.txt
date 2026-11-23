@@ -1,0 +1,94 @@
+package splitroute
+
+import (
+	"net"
+	"testing"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+func TestConfiguredECS(t *testing.T) {
+	for _, bad := range []string{"192.0.2.1/33", "2001:db8::1/24", "::ffff:192.0.2.1/24", "/", "/129"} {
+		if _, err := parseECS(bad, 1); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+	p4, err := parseECS("192.0.2.129/25", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p6, err := parseECS("2001:db8:abcd:12::1/56", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &group{ecs4: p4, ecs6: p6}
+	for _, tc := range []struct {
+		qtype, family uint16
+		bits          uint8
+		addr          string
+	}{{dns.TypeA, 1, 25, "192.0.2.128"}, {dns.TypeAAAA, 2, 56, "2001:db8:abcd::"}} {
+		q := new(dns.Msg).SetQuestion("example.test.", tc.qtype)
+		q.SetEdns0(1400, true)
+		q.IsEdns0().Option = []dns.EDNS0{&dns.EDNS0_SUBNET{Family: 1, SourceNetmask: 32, Address: net.ParseIP("198.51.100.4")}, &dns.EDNS0_NSID{Code: dns.EDNS0NSID}}
+		addECS(q, g.queryECS(t.Context(), tc.qtype))
+		wire, err := q.Pack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := new(dns.Msg)
+		if err := m.Unpack(wire); err != nil {
+			t.Fatal(err)
+		}
+		opt := m.IsEdns0()
+		if len(opt.Option) != 2 || !opt.Do() || opt.UDPSize() != 1400 {
+			t.Fatalf("unexpected OPT: %v", opt)
+		}
+		e, ok := opt.Option[1].(*dns.EDNS0_SUBNET)
+		if !ok || e.Family != tc.family || e.SourceNetmask != tc.bits || e.Address.String() != tc.addr || e.SourceScope != 0 {
+			t.Fatalf("unexpected ECS %v", e)
+		}
+	}
+}
+
+func TestECSReachesUpstream(t *testing.T) {
+	l, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(chan *dns.Msg, 1)
+	s := &dns.Server{PacketConn: l, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) { seen <- r; _ = w.WriteMsg(new(dns.Msg).SetReply(r)) })}
+	go s.ActivateAndServe()
+	defer s.Shutdown()
+	u, err := newUpstream("udp://"+l.LocalAddr().String(), "remote", time.Second, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := parseECS("/0", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &group{name: "remote", upstreams: []*upstream{u}, ecs6: p}
+	g.start(time.Second)
+	defer g.stop()
+	st := testState("example.test.")
+	if _, err := g.exchange(t.Context(), st); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case q := <-seen:
+		opt := q.IsEdns0()
+		if opt == nil || len(opt.Option) != 1 {
+			t.Fatalf("missing upstream ECS: %v", q)
+		}
+		e, ok := opt.Option[0].(*dns.EDNS0_SUBNET)
+		if !ok || e.Family != 2 || e.SourceNetmask != 0 || !e.Address.IsUnspecified() {
+			t.Fatalf("unexpected ECS: %v", e)
+		}
+	default:
+		t.Fatal("query did not reach upstream")
+	}
+	if st.Req.IsEdns0() != nil {
+		t.Fatal("original query was modified")
+	}
+}
